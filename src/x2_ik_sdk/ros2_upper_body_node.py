@@ -106,9 +106,38 @@ class X2UpperBodyIKNode:
             # single-threaded publish loop before additional waypoints are sent.
             time.sleep(max(0.0, wp.duration))
 
-    def run_once(self, side: ArmSide, target_xyz: list[float], dry_run: bool, duration: float) -> None:
+    def run_once(
+        self,
+        side: ArmSide,
+        target_xyz: list[float],
+        dry_run: bool,
+        duration: float,
+        target_rpy: list[float] | None,
+        keep_current_rpy: bool,
+        orientation_weight: float,
+        orientation_eps: float,
+    ) -> None:
         current = self.read_current_arm_pos()
-        result = self.solver.solve_position(side=side, target_xyz=target_xyz, current_arm_pos=current)
+        if target_rpy is not None and keep_current_rpy:
+            raise ValueError("Use either target_rpy or keep_current_rpy, not both")
+        if keep_current_rpy:
+            target_rpy = self.solver.fk_rpy(side, current)
+
+        if target_rpy is None:
+            result = self.solver.solve_position(
+                side=side,
+                target_xyz=target_xyz,
+                current_arm_pos=current,
+            )
+        else:
+            result = self.solver.solve_pose(
+                side=side,
+                target_xyz=target_xyz,
+                target_rpy=target_rpy,
+                current_arm_pos=current,
+                orientation_weight=orientation_weight,
+                orientation_eps=orientation_eps,
+            )
         self.node.get_logger().info(
             f"IK success={result.success} error={result.error_norm:.6f} arm_pos={result.arm_pos}"
         )
@@ -124,6 +153,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--urdf", type=Path)
     parser.add_argument("--side", choices=[side.value for side in ArmSide], default="right")
     parser.add_argument("--target", nargs=3, type=float, required=True, metavar=("X", "Y", "Z"))
+    parser.add_argument("--target-rpy", nargs=3, type=float, metavar=("ROLL", "PITCH", "YAW"))
+    parser.add_argument("--keep-current-rpy", action="store_true")
+    parser.add_argument("--orientation-weight", type=float, default=1.0)
+    parser.add_argument("--orientation-eps", type=float, default=1e-3)
     parser.add_argument("--dry-run", action="store_true", help="Compute IK but do not publish motion")
     parser.add_argument("--duration", type=float, default=2.0)
     parser.add_argument("--command-topic", default="/mc/upper_body_command")
@@ -144,7 +177,16 @@ def main() -> None:
         if not args.skip_mode_switch and not args.dry_run:
             node.switch_action("STAND_DEFAULT")
             node.switch_action("UPPERBODY_REMOTE_SPLIT")
-        node.run_once(ArmSide(args.side), [float(v) for v in args.target], args.dry_run, args.duration)
+        node.run_once(
+            ArmSide(args.side),
+            [float(v) for v in args.target],
+            args.dry_run,
+            args.duration,
+            args.target_rpy,
+            args.keep_current_rpy,
+            args.orientation_weight,
+            args.orientation_eps,
+        )
     finally:
         node.node.destroy_node()
         if rclpy.ok():

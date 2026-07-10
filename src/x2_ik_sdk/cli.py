@@ -17,6 +17,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--side", choices=[side.value for side in ArmSide], default="right")
     parser.add_argument("--target", nargs=3, type=float, metavar=("X", "Y", "Z"))
     parser.add_argument("--target-offset", nargs=3, type=float, metavar=("DX", "DY", "DZ"))
+    parser.add_argument("--target-rpy", nargs=3, type=float, metavar=("ROLL", "PITCH", "YAW"))
+    parser.add_argument("--keep-current-rpy", action="store_true")
+    parser.add_argument("--orientation-weight", type=float, default=1.0)
+    parser.add_argument("--orientation-eps", type=float, default=1e-3)
     parser.add_argument("--arm-pos", nargs=14, type=float, help="Seed arm_pos[14]. Default is ready pose.")
     parser.add_argument("--print-json", action="store_true")
     parser.add_argument("--limits", action="store_true", help="Print arm joint limits and exit")
@@ -45,7 +49,26 @@ def main() -> None:
     else:
         raise SystemExit("Provide --target or --target-offset")
 
-    result = solver.solve_position(side=side, target_xyz=target, current_arm_pos=arm_pos)
+    if args.target_rpy is not None and args.keep_current_rpy:
+        raise SystemExit("Use either --target-rpy or --keep-current-rpy, not both")
+
+    target_rpy = None
+    if args.keep_current_rpy:
+        target_rpy = solver.fk_rpy(side, arm_pos)
+    elif args.target_rpy is not None:
+        target_rpy = args.target_rpy
+
+    if target_rpy is not None:
+        result = solver.solve_pose(
+            side=side,
+            target_xyz=target,
+            target_rpy=target_rpy,
+            current_arm_pos=arm_pos,
+            orientation_weight=args.orientation_weight,
+            orientation_eps=args.orientation_eps,
+        )
+    else:
+        result = solver.solve_position(side=side, target_xyz=target, current_arm_pos=arm_pos)
     if args.print_json:
         payload = asdict(result)
         payload["side"] = result.side.value
@@ -58,8 +81,16 @@ def main() -> None:
     print(f"ee_frame: {result.ee_frame}")
     print(f"iterations: {result.iterations}")
     print(f"error_norm: {result.error_norm:.8f}")
+    if result.position_error_norm is not None:
+        print(f"position_error_norm: {result.position_error_norm:.8f}")
+    if result.orientation_error_norm is not None:
+        print(f"orientation_error_norm: {result.orientation_error_norm:.8f}")
     print(f"target_xyz: {result.target_xyz}")
     print(f"final_xyz:  {result.final_xyz}")
+    if result.target_rpy is not None:
+        print(f"target_rpy: {result.target_rpy}")
+    if result.final_rpy is not None:
+        print(f"final_rpy:  {result.final_rpy}")
     print("arm_pos[14]:")
     print(np.array2string(np.asarray(result.arm_pos), precision=6, suppress_small=True, separator=", "))
 

@@ -22,6 +22,10 @@ class IKResult:
     iterations: int
     ee_frame: str
     message: str = ""
+    target_rpy: list[float] | None = None
+    final_rpy: list[float] | None = None
+    position_error_norm: float | None = None
+    orientation_error_norm: float | None = None
 
 
 class X2ArmIKSolver:
@@ -108,6 +112,98 @@ class X2ArmIKSolver:
             message=msg,
         )
 
+    def solve_pose(
+        self,
+        side: ArmSide | str,
+        target_xyz: Iterable[float],
+        target_rpy: Iterable[float],
+        current_arm_pos: Iterable[float] | None = None,
+        *,
+        current_head_pos: Iterable[float] | None = None,
+        q_seed: np.ndarray | None = None,
+        orientation_weight: float = 1.0,
+        orientation_eps: float = 1e-3,
+    ) -> IKResult:
+        side = ArmSide(side)
+        target = np.asarray(list(target_xyz), dtype=float)
+        if target.shape != (3,):
+            raise ValueError(f"target_xyz must have length 3, got {target}")
+        target_rpy_arr = np.asarray(list(target_rpy), dtype=float)
+        if target_rpy_arr.shape != (3,):
+            raise ValueError(f"target_rpy must have length 3, got {target_rpy_arr}")
+        if orientation_weight <= 0.0:
+            raise ValueError("orientation_weight must be positive")
+
+        target_rotation = pin.rpy.rpyToMatrix(*target_rpy_arr.tolist())
+        q = self._seed_q(current_arm_pos, current_head_pos, q_seed)
+        frame_name = self.config.frame_for_side(side)
+        frame_id = self.model.getFrameId(frame_name)
+        active_v_idxs = self._active_velocity_indices(side)
+
+        err_norm = math.inf
+        pos_err_norm = math.inf
+        rot_err_norm = math.inf
+        iterations = 0
+        success = False
+        for iterations in range(1, self.config.max_iters + 1):
+            pin.forwardKinematics(self.model, self.data, q)
+            pin.updateFramePlacements(self.model, self.data)
+
+            current_pose = self.data.oMf[frame_id]
+            pos_err = target - current_pose.translation
+            rot_err = pin.log3(target_rotation @ current_pose.rotation.T)
+            pos_err_norm = float(np.linalg.norm(pos_err))
+            rot_err_norm = float(np.linalg.norm(rot_err))
+            err = np.concatenate([pos_err, orientation_weight * rot_err])
+            err_norm = float(np.linalg.norm(err))
+            if pos_err_norm < self.config.eps and rot_err_norm < orientation_eps:
+                success = True
+                break
+
+            jacobian = pin.computeFrameJacobian(
+                self.model,
+                self.data,
+                q,
+                frame_id,
+                pin.ReferenceFrame.LOCAL_WORLD_ALIGNED,
+            )
+            weighted_jacobian = jacobian.copy()
+            weighted_jacobian[3:, :] *= orientation_weight
+            velocity = self._damped_least_squares(weighted_jacobian, err, active_v_idxs)
+            step = velocity * self.config.dt
+            step_norm = float(np.linalg.norm(step))
+            if step_norm > self.config.max_step_norm:
+                step *= self.config.max_step_norm / step_norm
+
+            q = pin.integrate(self.model, q, step)
+            q = self._clip_q(q)
+
+        pin.forwardKinematics(self.model, self.data, q)
+        pin.updateFramePlacements(self.model, self.data)
+        final_pose = self.data.oMf[frame_id]
+        final_xyz = final_pose.translation.copy()
+        final_rpy = pin.rpy.matrixToRpy(final_pose.rotation).tolist()
+        arm_pos = self.arm_pos_from_q(q)
+        active_arm = arm_pos[:7] if side == ArmSide.LEFT else arm_pos[7:]
+
+        msg = "converged" if success else "max iterations reached"
+        return IKResult(
+            success=success,
+            side=side,
+            arm_pos=arm_pos,
+            active_arm=active_arm,
+            target_xyz=target.tolist(),
+            final_xyz=final_xyz.tolist(),
+            error_norm=err_norm,
+            iterations=iterations,
+            ee_frame=frame_name,
+            message=msg,
+            target_rpy=target_rpy_arr.tolist(),
+            final_rpy=final_rpy,
+            position_error_norm=pos_err_norm,
+            orientation_error_norm=rot_err_norm,
+        )
+
     def fk_xyz(
         self,
         side: ArmSide | str,
@@ -122,6 +218,21 @@ class X2ArmIKSolver:
         pin.forwardKinematics(self.model, self.data, q)
         pin.updateFramePlacements(self.model, self.data)
         return self.data.oMf[frame_id].translation.copy().tolist()
+
+    def fk_rpy(
+        self,
+        side: ArmSide | str,
+        current_arm_pos: Iterable[float] | None = None,
+        *,
+        current_head_pos: Iterable[float] | None = None,
+        q_seed: np.ndarray | None = None,
+    ) -> list[float]:
+        side = ArmSide(side)
+        q = self._seed_q(current_arm_pos, current_head_pos, q_seed)
+        frame_id = self.model.getFrameId(self.config.frame_for_side(side))
+        pin.forwardKinematics(self.model, self.data, q)
+        pin.updateFramePlacements(self.model, self.data)
+        return pin.rpy.matrixToRpy(self.data.oMf[frame_id].rotation).tolist()
 
     def q_from_arm_pos(
         self,
