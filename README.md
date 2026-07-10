@@ -1,17 +1,17 @@
 # x2_ik_sdk
 
-X2 上肢位置 IK SDK：输入当前 `arm_pos[14]` 和目标末端位置 `xyz`，输出新的 `arm_pos[14]`。
+X2 上肢 IK SDK：输入当前 `arm_pos[14]` 和目标末端位置 `xyz`，输出新的 `arm_pos[14]`；也支持可选的末端姿态约束 `roll/pitch/yaw`。
 
 ```text
-X2 URDF + current arm_pos[14] + target xyz
--> single-arm position IK
+X2 URDF + current arm_pos[14] + target xyz (+ optional rpy)
+-> single-arm position / pose IK
 -> UpperBodyCommandArray.arm_pos[14]
 ```
 
 本仓库只提供：
 
 1. 离线 IK 验证 CLI。
-2. Python IK API。
+2. Python 位置/姿态 IK API。
 3. 最小 ROS2 真机 adapter。
 
 不包含视觉、抓取策略、手指规划，也不替代官方运控。
@@ -63,6 +63,7 @@ x2-ik-demo --side right --target-offset 0.01 0.00 0.01 --print-json
 
 ```bash
 x2-ik-demo --side left --target-offset 0.01 0.00 0.01 --print-json
+x2-ik-demo --side right --target-offset 0.005 0.00 0.005 --keep-current-rpy --print-json
 x2-ik-demo --limits
 ```
 
@@ -83,6 +84,21 @@ result = solver.solve_position(
 if result.success:
     arm_pos = result.arm_pos
 ```
+
+如果移动末端时要保持当前夹爪朝向：
+
+```python
+current_rpy = solver.fk_rpy(ArmSide.RIGHT, current_arm_pos)
+
+result = solver.solve_pose(
+    side=ArmSide.RIGHT,
+    target_xyz=[0.32, -0.39, 0.23],
+    target_rpy=current_rpy,
+    current_arm_pos=current_arm_pos,
+)
+```
+
+也可以直接传目标姿态 `target_rpy=[roll, pitch, yaw]`，单位为弧度。
 
 `result.arm_pos` 长度为 14，可填入 `aimdk_msgs/msg/UpperBodyCommandArray.arm_pos`。
 
@@ -147,6 +163,7 @@ python -m py_examples.set_mc_action URS
 x2-ik-ros2-node \
   --side right \
   --target 0.32 -0.39 0.23 \
+  --keep-current-rpy \
   --duration 6.0 \
   --skip-mode-switch
 ```
